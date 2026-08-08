@@ -1,0 +1,9 @@
+data/
+*.log
+*.user
+*.suo
+.vs/
+bin/
+obj/
+qa/
+work/
