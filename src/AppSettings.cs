@@ -11,6 +11,7 @@ namespace RoboCopyPaste
         public bool Enabled = true;
         public bool StartWithWindows = false;
         public bool ConfirmOverwrite = true;
+        public bool ContextMenuEnabled = true;
         public int Threads = 16;
         public int Retries = 3;
         public int WaitSeconds = 2;
@@ -60,6 +61,7 @@ namespace RoboCopyPaste
                     if (key == "Enabled" && bool.TryParse(value, out flag)) settings.Enabled = flag;
                     else if (key == "StartWithWindows" && bool.TryParse(value, out flag)) settings.StartWithWindows = flag;
                     else if (key == "ConfirmOverwrite" && bool.TryParse(value, out flag)) settings.ConfirmOverwrite = flag;
+                    else if (key == "ContextMenuEnabled" && bool.TryParse(value, out flag)) settings.ContextMenuEnabled = flag;
                     else if (key == "Threads" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out number)) settings.Threads = Clamp(number, 1, 128);
                     else if (key == "Retries" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out number)) settings.Retries = Clamp(number, 0, 100);
                     else if (key == "WaitSeconds" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out number)) settings.WaitSeconds = Clamp(number, 0, 300);
@@ -77,12 +79,14 @@ namespace RoboCopyPaste
                 "Enabled=" + Enabled,
                 "StartWithWindows=" + StartWithWindows,
                 "ConfirmOverwrite=" + ConfirmOverwrite,
+                "ContextMenuEnabled=" + ContextMenuEnabled,
                 "Threads=" + Threads.ToString(CultureInfo.InvariantCulture),
                 "Retries=" + Retries.ToString(CultureInfo.InvariantCulture),
                 "WaitSeconds=" + WaitSeconds.ToString(CultureInfo.InvariantCulture)
             };
             File.WriteAllLines(SettingsPath, lines, new UTF8Encoding(false));
             ApplyStartup(StartWithWindows);
+            ContextMenuIntegration.Apply(ContextMenuEnabled);
         }
 
         private static int Clamp(int value, int min, int max)

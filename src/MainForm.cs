@@ -23,6 +23,7 @@ namespace RoboCopyPaste
         private CheckBox enabledBox;
         private CheckBox startupBox;
         private CheckBox confirmBox;
+        private CheckBox contextMenuBox;
         private NumericUpDown threadsBox;
         private NumericUpDown retriesBox;
         private NumericUpDown waitBox;
@@ -39,30 +40,58 @@ namespace RoboCopyPaste
         private volatile bool fileClipboardReady;
         private volatile bool replayingNativePaste;
         private bool hotkeyRegistered;
+        private readonly string initialPasteDestination;
+        private readonly bool contextInvocation;
 
-        public MainForm(bool startHidden)
+        public MainForm(bool startHidden, string pasteDestination, bool invokedFromContextMenu)
         {
+            initialPasteDestination = pasteDestination;
+            contextInvocation = invokedFromContextMenu;
+            allowExit = contextInvocation;
             settings = AppSettings.Load();
             BuildUi();
             Shown += delegate
             {
-                bool hookOk = !settings.Enabled || StartHotkey();
-                NativeMethods.AddClipboardFormatListener(Handle);
-                clipboardTimer = new System.Windows.Forms.Timer();
-                clipboardTimer.Interval = 500;
-                clipboardTimer.Tick += delegate { HandleClipboardUpdate(); };
-                clipboardTimer.Start();
+                bool hookOk = contextInvocation || !settings.Enabled || StartHotkey();
+                if (!contextInvocation)
+                {
+                    NativeMethods.AddClipboardFormatListener(Handle);
+                    clipboardTimer = new System.Windows.Forms.Timer();
+                    clipboardTimer.Interval = 500;
+                    clipboardTimer.Tick += delegate { HandleClipboardUpdate(); };
+                    clipboardTimer.Start();
+                }
+                if (!contextInvocation)
+                {
+                    try { ContextMenuIntegration.Apply(settings.ContextMenuEnabled); }
+                    catch (Exception ex)
+                    {
+                        contextMenuBox.Checked = false;
+                        WriteLog("资源管理器右键菜单注册失败：" + ex.Message);
+                    }
+                }
                 if (!hookOk)
                 {
                     settings.Enabled = false;
                     enabledBox.Checked = false;
-                    SetStatus("无法安装快捷键钩子，接管已关闭。", Color.Firebrick);
+                    SetStatus("无法注册 Ctrl+V 热键，快捷键接管已关闭。", Color.Firebrick);
                 }
                 else
                 {
                     SetStatus(settings.Enabled ? "已接管资源管理器中的文件 Ctrl+V" : "接管已暂停", settings.Enabled ? Color.SeaGreen : Color.DimGray);
                 }
                 if (startHidden) Hide();
+                if (!string.IsNullOrWhiteSpace(initialPasteDestination))
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        if (!HandlePasteToDestination(initialPasteDestination, "资源管理器右键菜单"))
+                        {
+                            SetStatus("剪贴板中没有可复制的文件", Color.DarkOrange);
+                            AppendOutput("右键粘贴未执行：剪贴板中没有有效的文件或文件夹。");
+                        }
+                    });
+                }
             };
         }
 
@@ -86,19 +115,21 @@ namespace RoboCopyPaste
             var title = new Label { AutoSize = true, Text = "RoboCopy Paste", Font = new Font(Font.FontFamily, 18F, FontStyle.Bold), ForeColor = Color.FromArgb(35, 49, 73), Margin = new Padding(0, 0, 0, 4) };
             root.Controls.Add(title);
 
-            var intro = new Label { AutoSize = true, MaximumSize = new Size(790, 0), Text = "在 Windows 资源管理器中复制文件后按 Ctrl+V，任务将由系统自带 robocopy.exe 执行。文字粘贴、地址栏和其他应用保持原样；无法安全解析时自动回退到 Windows。", ForeColor = Color.DimGray, Margin = new Padding(0, 0, 0, 12) };
+            var intro = new Label { AutoSize = true, MaximumSize = new Size(790, 0), Text = "在 Windows 资源管理器中复制文件后按 Ctrl+V，或在目标文件夹右键选择“使用 RoboCopy Paste 粘贴”。任务由系统自带 robocopy.exe 执行；文字粘贴和其他应用保持原样。", ForeColor = Color.DimGray, Margin = new Padding(0, 0, 0, 12) };
             root.Controls.Add(intro);
 
             var settingsPanel = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 6, Padding = new Padding(10), BackColor = Color.FromArgb(245, 247, 250), Margin = new Padding(0, 0, 0, 12) };
             enabledBox = new CheckBox { AutoSize = true, Text = "启用接管", Checked = settings.Enabled, Margin = new Padding(3, 6, 18, 3) };
             startupBox = new CheckBox { AutoSize = true, Text = "开机启动", Checked = settings.StartWithWindows, Margin = new Padding(3, 6, 18, 3) };
             confirmBox = new CheckBox { AutoSize = true, Text = "覆盖前确认", Checked = settings.ConfirmOverwrite, Margin = new Padding(3, 6, 18, 3) };
+            contextMenuBox = new CheckBox { AutoSize = true, Text = "资源管理器右键菜单", Checked = settings.ContextMenuEnabled, Margin = new Padding(3, 6, 18, 3) };
             threadsBox = MakeNumber(settings.Threads, 1, 128);
             retriesBox = MakeNumber(settings.Retries, 0, 100);
             waitBox = MakeNumber(settings.WaitSeconds, 0, 300);
             settingsPanel.Controls.Add(enabledBox, 0, 0);
             settingsPanel.Controls.Add(startupBox, 1, 0);
             settingsPanel.Controls.Add(confirmBox, 2, 0);
+            settingsPanel.Controls.Add(contextMenuBox, 3, 0);
             settingsPanel.Controls.Add(new Label { AutoSize = true, Text = "线程", Margin = new Padding(3, 8, 3, 3) }, 0, 1);
             settingsPanel.Controls.Add(threadsBox, 1, 1);
             settingsPanel.Controls.Add(new Label { AutoSize = true, Text = "重试", Margin = new Padding(12, 8, 3, 3) }, 2, 1);
@@ -249,6 +280,16 @@ namespace RoboCopyPaste
         {
             string destination = ExplorerBridge.GetDestination(foreground);
             if (string.IsNullOrEmpty(destination)) return false;
+            return HandlePasteToDestination(destination, "Ctrl+V");
+        }
+
+        private bool HandlePasteToDestination(string destination, string description)
+        {
+            if (string.IsNullOrWhiteSpace(destination) || !Directory.Exists(destination))
+            {
+                AppendOutput("粘贴目标不可访问：" + (destination ?? "(空)"));
+                return false;
+            }
 
             CopyMetadata metadata = ClipboardProtocol.TryGetCopyMetadata();
             string[] paths = ClipboardProtocol.TryGetFilePaths();
@@ -257,7 +298,7 @@ namespace RoboCopyPaste
                 string[] resolved = ResolveSources(metadata);
                 if (resolved != null)
                 {
-                    BeginInvoke((Action)delegate { PrepareAndQueue(resolved, destination, "Ctrl+V"); });
+                    BeginInvoke((Action)delegate { PrepareAndQueue(resolved, destination, description); });
                     return true;
                 }
 
@@ -283,7 +324,7 @@ namespace RoboCopyPaste
             string[] local = ExistingPaths(paths);
             if (local != null)
             {
-                BeginInvoke((Action)delegate { PrepareAndQueue(local, destination, "Windows 文件剪贴板"); });
+                BeginInvoke((Action)delegate { PrepareAndQueue(local, destination, description); });
                 return true;
             }
             return false;
@@ -428,13 +469,14 @@ namespace RoboCopyPaste
             settings.Enabled = enabledBox.Checked;
             settings.StartWithWindows = startupBox.Checked;
             settings.ConfirmOverwrite = confirmBox.Checked;
+            settings.ContextMenuEnabled = contextMenuBox.Checked;
             settings.Threads = (int)threadsBox.Value;
             settings.Retries = (int)retriesBox.Value;
             settings.WaitSeconds = (int)waitBox.Value;
             try
             {
                 settings.Save();
-                if (settings.Enabled)
+                if (settings.Enabled && !contextInvocation)
                 {
                     if (!StartHotkey())
                         throw new InvalidOperationException("Ctrl+V 已被其他程序注册，无法启用接管。");
@@ -511,7 +553,7 @@ namespace RoboCopyPaste
                 if (cancellation != null) cancellation.Cancel();
                 runner.Cancel();
             }
-            NativeMethods.RemoveClipboardFormatListener(Handle);
+            if (!contextInvocation) NativeMethods.RemoveClipboardFormatListener(Handle);
             if (clipboardTimer != null)
             {
                 clipboardTimer.Stop();
